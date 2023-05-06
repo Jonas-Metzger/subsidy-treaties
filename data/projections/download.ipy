@@ -1,0 +1,18 @@
+!wget https://zenodo.org/record/6016583/files/rffsps_v5.7z
+!7za x archive.7z -r -ir!rffsp_pop_in* -o./pop_income
+!7za x archive.7z -r -ir!*emissions.csv -o./emissions
+!7za x archive.7z -r -ir!README.md
+
+%cd pop_income
+df = pd.read_feather(f"rffsp_pop_income_run_{1}.feather").set_index(["Country", "Year"])
+df[['GDP_std', 'Pop_std']] = 0
+for i in tqdm.tqdm(range(1,10001)):
+  temp = pd.read_feather(f"rffsp_pop_income_run_{i}.feather").set_index(["Country", "Year"])
+  temp[['GDP_std', 'Pop_std']] = (temp[['GDP', 'Pop']]/1000)**2
+  df *= (i-1)/i
+  df += temp/i
+df['GDP_std'] -= (df['GDP']/1000)**2
+df['Pop_std'] -= (df['Pop']/1000)**2
+df['GDP_std'] = df['GDP_std']**0.5 * 1000
+df['Pop_std'] = df['Pop_std']**0.5 * 1000
+df.reset_index().to_feather('../rffsp_pop_income_mean.feather')
