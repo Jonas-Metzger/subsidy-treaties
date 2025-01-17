@@ -3,7 +3,7 @@
 This repo contains the code to reproduce the results in the [Subsidy Treaties](https://github.com/jonas-metzger/subsidy-treaties/tree/main/paper/Subsidy_Treaties-Jonas_Metzger.pdf) paper.
 
 This repo contains 
-- extensive datawrangling and statistical analysis in [`code/Data.ipynb`](https://github.com/Jonas-Metzger/subsidy-treaties/blob/main/code/Data.ipynb), combining various sources of publicly available data in `code/data/`, comprised of
+- extensive datawrangling and statistical analysis in [`code/Data.ipynb`](https://github.com/Jonas-Metzger/subsidy-treaties/blob/main/code/Data.ipynb), combining various sources of publicly available data in `code/data/`, comprised of:
   - a) climate data used to obtain country-specific estimates of marginal damages from warming
   - b) data on electricity generation
   - c) other economic indicators necessary to calibrate our strutcutal model
