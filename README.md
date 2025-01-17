@@ -1,3 +1,3 @@
-# Subsidy Treaties - Decarbonizing Global Emissions Without Sanctions
+# Subsidy Treaties - Global Abatement If Cooperation Is Fragile
 
-This repo reproduces the estimations and simulations for the Subsidy Treaties paper by Metzger (2023).
+This repo contains the code to reproduce the results in the [Subsidy Treaties Paper](https://github.com/jonas-metzger/subsidy-treaties/tree/main/paper/Subsidy_Treaties-Jonas_Metzger.pdf).
