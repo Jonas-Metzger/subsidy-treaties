@@ -1,0 +1,39 @@
+bash_script = """#!/bin/bash
+#SBATCH --job-name=mc_{}
+#SBATCH -t 15:00:00
+#SBATCH -p owners
+#SBATCH --ntasks=8
+#SBATCH --cpus-per-task=1
+#SBATCH --gpus=1
+#SBATCH --mem=10GB
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=metz.jonas@gmail.com
+
+module unload py-ipython
+
+cd $SCRATCH/github/subsidytreaties/code
+singularity exec --nv \
+  --bind /home/groups/athey:/home/users/metzgerj/athey_mount \
+  --bind /scratch/users/metzgerj/:/home/users/metzgerj/scratch_mount \
+  --pwd $HOME/scratch_mount/github/subsidytreaties/code \
+  $HOME/athey/metzgerj/stored/containers/pytorch_container/pytorch/ \
+  ipython Simulate.ipy -- \
+    --folder results_sensitivity --tax={} --generator_subsidy={} --battery_subsidy={} \
+    --p_breakdown={} --n_counterfactuals={} --seed={} --contiguous=1 --value_at_risk=0.0 --delay=4
+"""
+#
+for seed in range(1,500):
+    for policy in [(0.0, 0.8, 0.0), (1.0, 0.0, 0.0), (0.0, 0.99, 0.0)]:
+        tax, generator_subsidy, battery_subsidy = policy
+        n_counterfactuals = 2
+        p_breakdown = 0.001
+        launch = bash_script.format(
+            seed,
+            tax, generator_subsidy, battery_subsidy,
+            p_breakdown, n_counterfactuals, seed
+        )
+        with open("launch.sh", "w") as f:
+            f.write(launch)
+        !sbatch launch.sh
+  
+

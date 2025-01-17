@@ -1,0 +1,42 @@
+bash_script = """#!/bin/bash
+#SBATCH --job-name=treaty_{}_{}
+#SBATCH -t 15:00:00
+#SBATCH -p owners
+#SBATCH --ntasks=8
+#SBATCH --cpus-per-task=1
+#SBATCH --gpus=1
+#SBATCH -C "GPU_MEM:24GB|GPU_MEM:40GB|GPU_MEM:80GB"
+#SBATCH --mem=20GB
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=metz.jonas@gmail.com
+
+module unload py-ipython
+
+cd $SCRATCH/github/subsidytreaties/code
+singularity exec --nv \
+  --bind /home/groups/athey:/home/users/metzgerj/athey_mount \
+  --bind /scratch/users/metzgerj/:/home/users/metzgerj/scratch_mount \
+  --pwd $HOME/scratch_mount/github/subsidytreaties/code \
+  $HOME/athey/metzgerj/stored/containers/pytorch_container/pytorch/ \
+  ipython Simulation.ipy -- \
+    --folder results_opt_subsidy --global_tax_level {} --generator_subsidy_level {} --battery_subsidy_level {} \
+    --full_subsidy_years {} --p_conflict {} --n_counterfactuals {} --seed {}
+"""
+#
+for generator_subsidy_level in [0.99,]:#0.84, 0.86, 0.94, 0.96]:#[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.99]:
+    for battery_subsidy_level in [0.14, 0.16, 0.18]:#0.0, 0.04, 0.06, 0.08, 0.12]:#[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.99]:
+        global_tax_level = 0
+        n_counterfactuals = 2
+        p_conflict = 0.01
+        full_subsidy_years = 128
+        seed = 0
+        launch = bash_script.format(
+            generator_subsidy_level, battery_subsidy_level,
+            global_tax_level, generator_subsidy_level, battery_subsidy_level,
+            full_subsidy_years, p_conflict, n_counterfactuals, seed
+        )
+        with open("launch.sh", "w") as f:
+            f.write(launch)
+        !sbatch launch.sh
+  
+

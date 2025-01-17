@@ -1,0 +1,11 @@
+torch
+numpy
+pandas
+tqdm
+matplotlib
+scipy
+netCDF4
+h5py
+geopandas
+georasters
+openpyxl

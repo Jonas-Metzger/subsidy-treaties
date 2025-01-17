@@ -1,0 +1,72 @@
+﻿Country,ISO,S&P,Yield
+Japan,JPN,A+,0.00195
+Switzerland,CHE,AAA,0.00689
+Taiwan,TWN,AA+,0.0121
+Germany,DEU,AAA,0.01222
+Netherlands,NLD,AAA,0.01526
+Denmark,DNK,AAA,0.01554
+Sweden,SWE,AAA,0.01628
+Finland,FIN,AA+,0.01645
+France,FRA,AA,0.01795
+Austria,AUT,AA+,0.01797
+Belgium,BEL,AA,0.01837
+Ireland,IRL,AA-,0.01842
+Slovakia,SVK,A+,0.02221
+Slovenia,SVN,AA-,0.02257
+Portugal,PRT,BBB,0.02312
+Croatia,HRV,BBB+,0.02318
+Thailand,THA,BBB+,0.0235
+Morocco,MAR,BB+,0.02355
+Spain,ESP,A,0.02401
+United Kingdom,GBR,AA,0.02414
+Israel,ISR,AA-,0.02593
+Bulgaria,BGR,BBB,0.02618
+China,CHN,A+,0.02623
+Malta,MLT,A-,0.0265
+Singapore,SGP,AAA,0.02713
+Hong Kong,HKG,AA+,0.02843
+Lithuania,LTU,A+,0.029
+Cyprus,CYP,BBB-,0.02918
+Canada,CAN,AAA,0.02948
+United States,USA,AA+,0.02976
+Norway,NOR,AAA,0.03096
+Latvia,LVA,A+,0.0315
+South Korea,KOR,AA,0.03312
+Qatar,QAT,AA-,0.03451
+Australia,AUS,AAA,0.0348
+Italy,ITA,BBB,0.03512
+New Zealand,NZL,AA+,0.03563
+Vietnam,VNM,BB+,0.03603
+Greece,GRC,BB+,0.03696
+Malaysia,MYS,A-,0.03976
+Mauritius,MUS,,0.04156
+Czech Republic,CZE,AA-,0.04267
+Iceland,ISL,A,0.05562
+Philippines,PHL,BBB+,0.05884
+Poland,POL,A-,0.0603
+Bahrain,BHR,B+,0.06234
+Botswana,BWA,BBB+,0.06731
+Chile,CHL,A,0.0697
+Indonesia,IDN,BBB,0.07094
+India,IND,BBB-,0.07264
+Serbia,SRB,BB+,0.07332
+Peru,PER,BBB,0.0782
+Romania,ROU,BBB-,0.0789
+Bangladesh,BGD,BB-,0.08315
+Hungary,HUN,BBB,0.0874
+Mexico,MEX,BBB,0.09165
+Russia,RUS,NR,0.0926
+South Africa,ZAF,BB-,0.10325
+Namibia,NAM,,0.11753
+Colombia,COL,BB+,0.119
+Brazil,BRA,BB-,0.12212
+Nigeria,NGA,B-,0.12797
+Pakistan,PAK,B-,0.12828
+Kazakhstan,KAZ,BBB-,0.13505
+Kenya,KEN,B,0.14231
+Turkey,TUR,B+,0.1633
+Uganda,UGA,B,0.16593
+Egypt,EGY,B,0.18497
+Ukraine,UKR,SD,0.19257
+Zambia,ZMB,SD,0.2625
+Sri Lanka,LKA,SD,0.27299

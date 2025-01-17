@@ -1,0 +1,355 @@
+#pip install numpy pandas tqdm matplotlib scipy torch
+import argparse, time, os
+import numpy as np
+import pandas as pd
+from matplotlib import pyplot as plt
+import torch
+import torch.nn.functional as F
+from tqdm.auto import tqdm
+from scipy.interpolate import InterpolatedUnivariateSpline
+
+
+parser = argparse.ArgumentParser(description='Simulation parameters')
+parser.add_argument('--folder', type=str, default="results", help='Folder to save results in')
+parser.add_argument('--tax', type=float, default=0.0, help='Global tax level: 0 = no global tax, 1 = globally optimal tax')
+parser.add_argument('--generator_subsidy', type=float, default=0.7, help='Generator subsidy level in % of fixed costs')
+parser.add_argument('--battery_subsidy', type=float, default=0.0, help='Battery subsidy level in % of fixed costs')
+parser.add_argument('--p_breakdown', type=float, default=0.2, help='Probability that cooperation breaks down in any given year')
+parser.add_argument('--n_counterfactuals', type=int, default=12, help='Number of (subsampled) years in which breakdown is simulated')
+parser.add_argument('--delay', type=int, default=4, help='Delay the start of the treaty, giving the economy time to settle in')
+parser.add_argument('--value_at_risk', type=float, default=0.0, help='Total value at risk if cooperation breaks down, in trillions USD')
+parser.add_argument('--uniform', type=bool, default=False, help='Whether to split the welfare gains uniformly across countries')
+parser.add_argument('--contiguous', type=bool, default=False, help='Whether to assume cooperation is attempted between the n_counterfactuals breakdown points or not.')
+parser.add_argument('--seed', type=int, default=0, help='Random seed for cost perturbations')
+parser.add_argument('--eval', type=bool, default=False, help='Evaluate model once, do not train')
+parser.add_argument('--n_steps', type=int, default=200000, help='Number of steps to train for')
+(args, _)= parser.parse_known_args(); print(args)
+
+# Unpack arguments
+tax = args.tax
+generator_subsidy = args.generator_subsidy
+battery_subsidy = args.battery_subsidy
+p_breakdown = args.p_breakdown
+value_at_risk = args.value_at_risk
+uniform = args.uniform
+contiguous = args.contiguous
+n_counterfactuals = args.n_counterfactuals
+folder = args.folder
+seed = args.seed
+n_steps = args.n_steps
+delay = args.delay 
+storage = True # whether to include batteries and pumped hydro in the model
+do_print = False # if false, will log to log.txt instead of printing to console
+
+# Initialize environment specific variables
+if not os.path.exists(folder): os.mkdir(folder)
+path  = f"{folder}/run_tax{tax}_gsub{generator_subsidy}_bsub{battery_subsidy}"
+path += f"_p{p_breakdown}_n{n_counterfactuals}_delay{delay}_valueatrisk{value_at_risk}_uniform{uniform}"
+path += f"_contiguous{contiguous}_seed{seed}"
+if not os.path.exists(path): os.mkdir(path)
+
+if do_print:
+    _print = print
+else:
+    print(f"writing to {path}/log.txt")
+    def _print(*strings):
+        string = " ".join(str(_) for _ in strings) + "\n"
+        with open(path+"/log.txt", "a") as f:
+            f.write(string)
+
+device = 'cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu')
+dtype = torch.float32 if device == 'mps' else torch.float64 # fp64 is preferred to avoid NaNs
+_print(f"Running on {device}")
+
+
+# Load Results from Data.ipynb
+projections = pd.read_csv("data/combined_projections.csv", float_precision="round_trip").query('Year % 10 == 0').set_index(["Country", "Year"])
+parameters  = pd.read_csv("data/combined_parameters.csv", float_precision="round_trip").set_index(["Country", "Technology"])
+n_hours_sampled = parameters.columns.str.startswith("Amount_During_Hour_").sum()
+countries = ["USA", "CHN", "EU", "IND"]
+techs = pd.Series(
+    ['On-shore wind', 'PV utility crystalline fixed', 'Advanced pulverized coal', 'Combined cycle conventional',
+     'Hydropower', 'Nuclear, APWR'] + ["Pumped hydro", "Battery storage"] * int(storage), name="Technology"
+)
+
+
+# Set up additional hyperparameters
+a = torch.tensor([0.025, 0.042, 0.025, 0.042]).to(dtype).to(device)[None, :, None, None, None] # expenditure share electricity
+s = 0.01 # demand elasticity within year (virtually zero, as small as possible without causing NaNs @ fp64)
+n_techs = len(techs)
+n_years = 128
+n_countries = len(countries)
+n_counterfactuals = min(n_counterfactuals, n_years-delay)
+years = [2018+d for d in range(n_years)]
+bnUSD = 1e-2  # rescales variables measured in US dollars
+TW    = 1     # rescales variables measured in Watts
+learning_rate = 1e-3
+save_every = 2000
+subsidy_level = torch.ones(1, 1, n_techs, n_years, 1).to(device) * generator_subsidy
+subsidy_level[:, :, ~techs.str.contains("PV|wind")] = 0
+subsidy_level[:,:, techs=="Battery storage"] = battery_subsidy
+value_at_risk *= 1e3 * bnUSD / n_countries
+
+# Initialize parameters. Throughout, the tensor dimensions are: [n_counterfactuals, n_countries, n_techs, n_years, n_hours_sampled]
+extract_projection = (lambda var: projections.loc[countries]
+ .reset_index().pivot(index="Country", columns="Year", values=var)
+ .apply(lambda x: pd.Series(InterpolatedUnivariateSpline(x.index, x, ext="extrapolate", k=1)(years), index=years, name=x.name), axis="columns")
+ .loc[countries, years] # otherwise may be sorted incorrectly
+ .pipe(lambda x: torch.tensor(x.to_numpy(), device=device, dtype=dtype))
+ .reshape(1, n_countries, 1, n_years, 1)
+)
+
+extract_parameter = (lambda *vars, techs=techs: parameters.loc[countries]
+ .reset_index().pivot(index="Country", columns="Technology", values=list(vars))
+ .loc[countries, pd.MultiIndex.from_product((vars, techs))]  # otherwise may be sorted incorrectly
+ .pipe(lambda x: torch.tensor(x.to_numpy(), device=device, dtype=dtype))
+ .reshape(1, n_countries, len(vars), 1, len(techs)).transpose(2, 4)
+)
+
+hours_per_period = 365 * 24 / n_hours_sampled # adjusts capacity per subperiod such that a year has 365*24 hours
+tCO2_per_kWh = pd.Series([0, 0, 868/831512, 743/1687067, 0, 0] + [0, 0] * int(storage), index=techs, dtype=np.float64) # https://www.eia.gov/tools/faqs/faq.php?id=74&t=11
+e_Q = torch.tensor(tCO2_per_kWh[techs].to_numpy(), dtype=dtype, device=device)[None, None, :, None, None] / TW  # GtCO2/TWh=tCO2/kWh  # [1, 1, n_techs, 1, 1]
+c_Q = extract_parameter("c_Q ($/kWh)") * bnUSD / TW                                                    # [1, n_countries, n_techs, 1, 1]
+c_O = extract_parameter("c_O ($/kW/yr)") * bnUSD / TW                                                  # [1, n_countries, n_techs, 1, 1]
+c_K = extract_parameter("c_K ($/kW)") * bnUSD / TW                                                     # [1, n_countries, n_techs, 1, 1]
+K_start = extract_parameter(f"Preinstalled {min(years)} (GW)") / 1e3 * TW                   # bn kW=TW # [1, n_countries, n_techs, 1, 1]
+K_max = torch.maximum(K_start+1e-2, extract_parameter("Potential (GW)").clip(0,1e5)/1e3*TW) # bn kW=TW # [1, n_countries, n_techs, 1, 1]
+K_max[:,:,techs=="Hydropower"] = (K_start[:,:,techs=="Hydropower"]+1e-4)*1.2 # Jacobson et al leave significant potential for low-cost Hydro, we'll be more conservative about that
+
+decay = torch.exp(-1/extract_parameter("Lifetime (yrs)")[:,0:1,:,:,:])                                 # [1, 1, n_techs, 1, 1]            # same across countries
+I_bau = extract_projection("gdp70") * bnUSD                       # bn$ (2020 PPP)                     # [1, n_countries, 1, n_years, 1]
+T_bau = extract_projection("temp70") # °C                                                              # [1, n_countries, 1, n_years, 1]
+rate  = extract_projection("real_bond_rate")                                                           # [1, n_countries, 1, n_years, 1]
+rate += (risk_premium := 0.02)
+dT_de = -extract_projection("warming_per_GtCO2e")[:,:,:,0:1,:]    # Kelvin_per_cumulative_GtCO2            # [1, n_countries, 1, 1, 1]
+dlogI_dT = -0.01
+omega = extract_parameter(*[f"Amount_During_Hour_{i}" for i in range(n_hours_sampled)], techs=["Demand"])  # [1, n_countries, 1, 1, n_hours_sampled]
+gamma = extract_parameter(*[f"Amount_During_Hour_{i}" for i in range(n_hours_sampled)]) * hours_per_period # [1, n_countries, n_techs, 1, n_hours_sampled]
+
+storage_efficiency = extract_parameter("Storage efficiency (%)")
+storage = (storage_efficiency.isnan().sum([0,1,3,4]) == 0)
+if storage.any(): # for storage, dischargeable kWh per kW per subperiod does not depend on hours_per_period, only on the storage tech itself (if we're conservative)
+    gamma[:,:,storage] = extract_parameter("Storage duration (kWh/kW)")[:,:,storage]
+
+
+# If seed != 0, will multiply all costs with a random factor around +-10%. Used in sensitivity analysis.
+if seed != 0:
+    torch.manual_seed(seed)
+    randomness = torch.randn(1, n_countries, n_techs, 1, 1, device=device, dtype=dtype).mul(0.1).exp() # lets costs vary by +-10%
+    for _ in [c_Q, c_O, c_K]:
+        _ *= randomness
+    rate *= torch.rand(1, n_countries, 1, 1, 1, device=device, dtype=dtype).mul(0.25).exp() # lets rates vary by +-25%
+    dlogI_dT *= torch.randn(1, n_countries, 1, 1, 1, device=device, dtype=dtype).mul(0.2).exp() # dlogI_dT had a relative standard error of 0.002/0.01=0.2, so we let it vary by +-20%
+
+
+
+
+
+# set up counterfactuals: 0 is BAU, rest are possible breakdowns of cooperation in years between [delay, n_years]
+breakdown_at = delay + torch.arange(n_counterfactuals, device=device) * ((n_years-delay)//(n_counterfactuals-1))
+treaty_started = (torch.arange(n_years, device=device) >= delay).reshape(1, 1, 1, -1, 1).to(torch.int)
+branch = (breakdown_at.reshape(-1, 1, 1, 1, 1) <= torch.arange(n_years, device=device).reshape(1, 1, 1, -1, 1)).to(torch.int); branch[0] = 1
+branch_counterfactuals = lambda x: x*branch + (1-branch)*torch.cat([x[:1, :, :, :delay].detach(), x[-1:, :, :, delay:]], dim=3) # counterfactuals branch at treaty start and breakdown
+
+if contiguous: # attempt cooperation between breakdown points (likelihoods are normalized to approximate the possibility of breakdowns between breakdown points)
+    cooperate = (1-branch) * treaty_started
+    breakdown = (cooperate < cooperate.roll(-1,0)).to(torch.int); breakdown[0] = 0
+else:          # only attempt cooperation at breakdown points (likelihoods below wouldn't need to be normalized)
+    cooperate = (1-branch) * torch.isin(torch.arange(n_years, device=device).reshape(1, 1, 1, -1, 1), breakdown_at)
+    breakdown = (cooperate < cooperate.roll(-1,0)).to(torch.int); breakdown[0] = 0
+
+likelihood = ( (1-p_breakdown)**cooperate.sum(3, keepdim=True) * p_breakdown**(breakdown.sum(3, keepdim=True)) ).clip(1e-3)
+likelihood[0] = 1; likelihood[1:] /= likelihood[1:].sum(0, keepdim=True) # normalize likelihoods
+average_counterfactuals = lambda x: torch.cat([x[:1], (likelihood*x)[1:].sum(0, keepdim=True)]) # averages futures according to their likelihood, keeps BAU separate
+
+# helpful globals for solving the model
+discount = 1/(1+rate).cumprod(dim=3)
+z = a**a*(1-a)**(1-a)
+Q_CES = lambda Qtotal: (omega**(1/s)*Qtotal**((s-1)/s)).sum(-1, keepdim=True)**(s/(s-1))
+P_CES = lambda p: (omega*p**(1-s)).sum(-1, keepdim=True)**(1/(1-s))
+P = lambda I, Qtotal: a*I*(omega/Qtotal)**(1/s)*Q_CES(Qtotal)**(1/s-1)
+V  = lambda I, p: I*z/P_CES(p)**a
+positive = lambda x, eps: x + F.relu(eps-x).detach()
+leaky_clip = lambda x, min, max, slope=0.1: max-F.leaky_relu(max-(F.leaky_relu(x-min, slope)+min), slope) # has better gradients than clip
+clip = lambda x, min, max, slope=0.1: (x.clip(min, max) - leaky_clip(x, min, max, slope)).detach() + leaky_clip(x, min, max, slope) # forward same as clip, but backward has better gradients
+sum_future = lambda x: x.flip(3).cumsum(3).flip(3)
+balance_budget = lambda b: b - (likelihood*discount*b)[1:,:,:,delay:].sum([0,3], keepdim=True)/discount/(n_years-delay) * treaty_started
+
+# initialize variables
+if not os.path.exists(path+"/checkpoint.pt"): 
+    first_step = 0
+    B_ = torch.nn.Parameter(torch.zeros(n_counterfactuals, n_countries, 1, n_years, 1).to(dtype).to(device))
+    Q_ = torch.nn.Parameter(K_start.expand(n_counterfactuals, n_countries, n_techs, n_years, n_hours_sampled)*gamma/TW/2)
+    K_ = torch.nn.Parameter(K_start.expand(n_counterfactuals, n_countries, n_techs, n_years, 1).clone())
+    transfer = torch.nn.Parameter(torch.ones(1, n_countries, 1, 1, 1).to(dtype).to(device))
+    profits = 0
+    opt = torch.optim.Adam([B_, Q_, K_, transfer], lr=learning_rate)
+    scheduler = torch.optim.lr_scheduler.LinearLR(opt, start_factor=1, end_factor=1, total_iters=n_steps)
+else:
+    checkpoint = torch.load(f"{path}/checkpoint.pt", map_location=device, weights_only=False)
+    first_step = checkpoint["step"]
+    _print(f"resuming checkpoint from step {first_step}...")
+    print(f"resuming checkpoint from step {first_step}...")
+    B_, Q_, K_, profits, transfer = checkpoint["params"]
+    opt = torch.optim.Adam([B_, Q_, K_, transfer], lr=learning_rate)
+    opt.load_state_dict(checkpoint["optimizer"])
+    scheduler = torch.optim.lr_scheduler.LinearLR(opt, start_factor=1, end_factor=1, total_iters=n_steps)
+    scheduler.load_state_dict(checkpoint["scheduler"])
+
+try:
+
+    # impose constraints on variables via transformations
+    def get_variables(): 
+        B = balance_budget(branch_counterfactuals(B_))
+        B[0] *= 0; # 0th counterfactual is BAU, govts will use bonds only for pareto-improvement over BAU
+        
+        K = clip(torch.cat([K_start.expand(n_counterfactuals, n_countries, n_techs, 1, 1), branch_counterfactuals(K_)[:,:,:,:-1]], dim=-2), torch.zeros_like(K_max), K_max) # non-negativity, preinstalled capacity, caps total potential
+
+        Q = clip(branch_counterfactuals(Q_) * TW, torch.zeros_like(K), gamma * K) # imposes non-negativity and capacity constraints
+    
+        # for batteries, Q here refers to the charge state (in dischargeable kWh) of the batteries. To translate into discharged electricity, we first-difference:
+        if storage.any():
+            Q[:,:,storage] -= Q[:,:,storage].roll(1, dims=-1) # for simplicity, last charge state in a year feeds into first day of the *same* year
+            Q[:,:,storage] *= torch.where(Q[:,:,storage]>0, storage_efficiency[:,:,storage], 1) # discharges are diminished by storage_efficiency
+    
+        with torch.no_grad(): # computes choice-dependent exogenous variables
+            T = T_bau + dT_de * (e_Q * (Q - Q[0:1])).sum([1,2,4], keepdim=True).cumsum(3) # counterfactual 0 is BAU
+            I = I_bau * torch.exp(dlogI_dT * ((T - 8.8).pow(2) - (T_bau - 8.8).pow(2))/2)
+            scc = sum_future(discount * I * 0.01 * (T - 8.8) * dT_de) / discount    # social cost of carbon
+            tau_Q = e_Q * (scc  + cooperate * tax * (scc.sum(1, keepdim=True) - scc))
+            tau_K = cooperate * subsidy_level * -c_K.min(1, keepdim=True).values #* torch.tensor(techs.str.contains('PV|wind|Battery'), dtype=dtype, device=device)[:,None,None]
+        return B, K, Q, T, I, scc, tau_Q, tau_K
+
+
+    # helper function for saving
+    def save_plot(country, counterfactual=n_counterfactuals-1):
+        plt.ioff()
+        f, ax = plt.subplots(5, 3, figsize=(15, 25))
+        f.suptitle(f"Simulation Results for {country} | iteration {step}")
+        country_idx = countries.index(country)
+        ax[0,0].plot(((e_Q * Q).sum([1,2,4], keepdim=True).cumsum(3)/(e_Q * Q[0:1]).sum([1,2,4], keepdim=True).cumsum(3))[:,0,0,:,0].T.cpu().detach(), label=range(n_counterfactuals))
+        ax[0,0].set_title(r"$\Delta$ log(Cumulative Emissions)")
+        ax[0,0].legend()
+        ax[1,0].plot((e_Q*(Q.detach())).sum([2,4], keepdim=True)[:,country_idx,0,:,0].T.cpu().detach(), label=range(n_counterfactuals))
+        ax[1,0].set_title("Emissions (GtCO2e/yr)")
+        ax[1,0].legend()
+        ax[0,1].plot((v/v[0:1].detach()).log()[:,country_idx,0,:,:].sum(-1).T.cpu().detach(), label=range(n_counterfactuals), alpha=0.8)
+        npv = (likelihood*discount*(v/v[0:1].detach()-1)*I_bau)[1:, country_idx].sum().cpu().item()/bnUSD/1000
+        ax[0,1].set_title(r"$\Delta$ Log Utility, NPV:" + f"{npv:.3f}T$")
+        ax[0,1].set_ylim(-0.01, 0.01)
+        ax[0,1].legend()
+        ax[0,2].plot((B/I)[:,country_idx,0,:,0].T.cpu().detach(), label=range(n_counterfactuals), alpha=0.8)
+        ax[0,2].set_title(r"$\Delta$ Deficit/GDP")
+        ax[0,2].legend()
+        Q_gen = torch.where(storage[None, None,:,None,None], F.relu(Q), Q)
+        ax[2,1].plot(Q_gen[counterfactual,country_idx,:,:,:].sum(-1).T.cpu().detach(), label=techs.where(~storage.cpu(), techs + " (discharge)"))
+        ax[2,1].set_title("Electricity Demand")
+        ax[2,1].legend()
+        ax[1,1].plot(K[counterfactual,country_idx,:,:,0].T.cpu().detach(), label=techs)
+        ax[1,1].set_title("Capacity")
+        ax[1,1].legend()
+        ax[1,2].plot(((I-I[0:1])/I[0:1]).detach()[:,country_idx,0,:,:].sum(-1).T.cpu().detach(), label=range(n_counterfactuals))
+        ax[1,2].set_title(r"$\Delta\log$ Income")
+        ax[1,2].legend()
+        ax[2,2].plot((I_disposable-I_disposable[0:1].detach())[:,country_idx,0,:,:].sum(-1).T.cpu().detach()/bnUSD, label=range(n_counterfactuals))
+        ax[2,2].set_title(r"$\Delta$ Disposable Consumer Income (bn$)")
+        ax[2,2].legend()
+        ax[2,0].plot((T-T[0:1])[:,country_idx,0,:,0].T.cpu().detach(), label=range(n_counterfactuals))
+        ax[2,0].set_title(r"$\Delta$ Temperature (°C)")
+        ax[2,0].legend()
+        ax[3,0].plot((Q_gen-Q_gen[0:1])[counterfactual,country_idx,:,:,:].sum(-1).detach().cpu().T, label=techs.where(~storage.cpu(), techs + " (discharge)"))
+        ax[3,0].set_title(r"$\Delta Q$ between counterfactuals")
+        ax[3,0].legend()
+        ax[3,1].plot((K-K[0:1])[counterfactual,country_idx,:,:,0].detach().cpu().T, label=techs)
+        ax[3,1].set_title(r"$\Delta K$ between counterfactuals")
+        ax[3,1].legend()
+        ax[3,2].plot(scc[counterfactual,:,0,:,0].detach().cpu().T/bnUSD, label=countries)
+        ax[3,2].set_title("Social Cost of Carbon ($/tCO2e)")
+        ax[3,2].legend()
+        ax[4,0].plot(Q.sum([2,4], keepdim=True)[:,country_idx,0,:,0].detach().cpu().T/TW, label=range(n_counterfactuals))
+        ax[4,0].set_title("Total Electricity Demand (TWh)")
+        ax[4,0].legend()
+        ax[4,1].plot(((p*Q).sum([2,4], keepdim=True)/Q.sum([2,4], keepdim=True)).detach().cpu()[:,country_idx,0,:,0].T/bnUSD*TW, label=range(n_counterfactuals))
+        ax[4,1].set_title("Average Electricity Price ($/kWh)")
+        ax[4,1].legend()
+        ax[4,2].plot(T[:,country_idx,0,:,0].T.cpu().detach(), label=range(n_counterfactuals))
+        ax[4,2].set_title(r"Temperature (°C)")
+        ax[4,2].legend()
+        f.savefig(f"{path}/{country}_{counterfactual}.svg")
+        plt.close(f)
+
+    def save_results():
+        checkpoint = {
+            'step': step,
+            'params': (B_, Q_, K_, profits, transfer),
+            'optimizer': opt.state_dict(),
+            'scheduler': scheduler.state_dict()
+        }
+        temp, loc = f"{path}/checkpoint.temp", f"{path}/checkpoint.pt"
+        torch.save(checkpoint, temp)
+        !mv $temp $loc
+    
+    
+    # Solve Model
+    steps = range(first_step, n_steps+1)
+    if do_print:
+        steps = tqdm(steps, position=0, initial=first_step, leave=True)
+        _print = steps.write
+
+    start = time.time()
+    
+    for step in steps:
+        opt.zero_grad()
+        B, K, Q, T, I, scc, tau_Q, tau_K = get_variables()
+        dK = torch.cat([K[:,:,:,1:], K[:,:,:,-1:]], -2) - K*decay
+
+        tax_refund = (tau_Q * Q).sum([2,4], keepdim=True)
+        subsidy_contribution = (-tau_K * F.relu(dK)).sum([2], keepdim=True)
+        net_transfer = (transfer - transfer.mean(1, keepdim=True)) * cooperate * uniform
+        I_disposable = positive(B  + (I + tax_refund - subsidy_contribution + profits - value_at_risk * breakdown + net_transfer).detach(), 1e-2 * bnUSD)
+        
+        p = P( I_disposable, Q.sum(2, keepdim=True).clip(1e-4)).detach()
+        profit = ( (p * Q - (tau_Q + c_Q) * F.relu(Q)).sum(4, keepdim=True) - c_O * K - (c_K + tau_K) * F.relu(dK) ).sum(2, keepdim=True)
+        npv = average_counterfactuals(profit * discount).sum(3, keepdim=True) # npv of firms
+        
+        v = V(I_disposable, p)
+        pareto_penalty = (v[1:]/v[0:1].detach().clip(1e-6)*1e3).var([0,3], keepdim=True).mean()
+        
+        
+        v = V((I_disposable - transfer).detach() + transfer, p) # only use gradients of uniform_penalty wrt to transfer
+        uniform_penalty = average_counterfactuals( (v/v[0:1].detach().clip(1e-6)*1e3).mean(3, keepdim=True))[1:].var(1, keepdim=True).mean()
+
+        maximize = npv.mean() - pareto_penalty - uniform_penalty# govt uses B to ensure pareto improvement across generations and counterfactuals, firms maximize npv
+        maximize *= n_counterfactuals
+        
+        if maximize.isnan():
+            _print("NAN detected!")
+            break
+
+        if args.eval and step > 0:
+            break
+        
+        profits = profit.detach()#*learning_rate + (1-learning_rate)*profits
+        if step > 5: # skip the first few updates to initialize profits at a fixed point
+            (-maximize).backward()
+            opt.step()
+            scheduler.step()
+        
+        if (step % save_every == 0) or (step <= 5):
+            with torch.no_grad():
+                save_results()
+                for country in countries:
+                    save_plot(country)
+                    save_plot(country, counterfactual=0)
+            end = time.time()
+             # note: not expected to increase monotonically: we solve for an equilibrium (=detach exogenous variables) not an optimum 
+            welfare = (likelihood*discount*(v/v[0:1].detach()-1)*I_bau)[1:].sum([0,2,3,4]).cpu()/bnUSD/1000
+            _print(f"i: {step:5d}, npv: {npv.mean().detach().item():.6}, welfare: {welfare.sum().item():.6}, welfare_US: {welfare[0].item():.6}, welfare_CHN: {welfare[1].item():.6}, welfare_EU: {welfare[2].item():.6}, welfare_IND: {welfare[3].item():.6}, pareto: {pareto_penalty.detach().item():.6}, uniform: {uniform_penalty.detach().item():.6}, maximize: {maximize.cpu().detach().item():.6}, diff: {(profits-profit).abs().max().item():.4}, sec/{save_every}it: {end-start:.2f}") 
+            start = time.time()
+
+except KeyboardInterrupt:
+    _print("Aborted.")
+    pass
+
+
+

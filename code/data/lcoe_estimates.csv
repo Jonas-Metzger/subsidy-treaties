@@ -1,0 +1,31 @@
+Country,Technology,LCOE
+India,Coal,85.38518001
+United States,Coal,109.7144953
+China,Coal,74.66374807
+Europe,Coal,
+Japan,Coal,99.83666903
+India,Gas(CCGT),
+United States,Gas(CCGT),44.98244816
+China,Gas(CCGT),83.99523875
+Europe,Gas(CCGT),71.004817
+Japan,Gas(CCGT),92.51925293
+India,Nuclear,47.64291117
+United States,Nuclear,71.2491172
+China,Nuclear,66.01228567
+Europe,Nuclear,71.10063281
+Japan,Nuclear,86.66835955
+India,Wind onshore (>= 1MW),35.82747276
+United States,Wind onshore (>= 1MW),38.90392863
+China,Wind onshore (>= 1MW),58.37495717
+Europe,Wind onshore (>= 1MW),54.52327936
+Japan,Wind onshore (>= 1MW),140.1690682
+India,Wind offshore,
+United States,Wind offshore,65.55532384
+China,Wind offshore,81.81588077
+Europe,Wind offshore,89.82056763
+Japan,Wind offshore,200.1784969
+India,Solar PV (utility scale),35.48801852
+United States,Solar PV (utility scale),43.99869816
+China,Solar PV (utility scale),50.68083207
+Europe,Solar PV (utility scale),70.24656697
+Japan,Solar PV (utility scale),172.0514607

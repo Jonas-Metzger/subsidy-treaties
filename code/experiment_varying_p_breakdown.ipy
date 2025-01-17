@@ -1,0 +1,36 @@
+bash_script = """#!/bin/bash
+#SBATCH --job-name=sim2_{}_{}_{}
+#SBATCH -t 48:00:00
+#SBATCH -p owners
+#SBATCH --gpus=1
+#SBATCH -C "GPU_MEM:32GB|GPU_MEM:48GB|GPU_MEM:40GB|GPU_MEM:80GB"
+#SBATCH --mem=20GB
+
+module unload py-ipython
+
+cd $SCRATCH/github/subsidytreaties/code
+apptainer exec --nv \
+  --bind /scratch/users/metzgerj/:/home/users/metzgerj/scratch_mount \
+  --pwd $HOME/scratch_mount/github/subsidytreaties/code \
+  $HOME/athey/metzgerj/stored/containers/pytorch_container/pytorch/ \
+  ipython Simulate.ipy -- \
+    --folder results_p_breakdown --tax={} --generator_subsidy={} --battery_subsidy={} \
+    --p_breakdown={} --n_counterfactuals={} --value_at_risk={} {} --seed 0 --n_steps=200000 --uniform=1 --delay=4 
+"""
+#
+for p_breakdown in [0.001, 0.05, 0.15, 0.3, 0.6, 0.9]:
+    for policy in [(1.0, 0.0, 0.0),(0.0, 0.8, 0.0), (0.0, 0.5, 0.0)]:
+        for value_at_risk in [0.0, 2.5]:
+            for treaty in [(64, True), (13, False)]:
+                tax, generator_subsidy, battery_subsidy = policy
+                n_counterfactuals, contiguous = treaty
+                launch = bash_script.format(
+                    p_breakdown, tax, generator_subsidy,
+                    tax, generator_subsidy, battery_subsidy,
+                    p_breakdown, n_counterfactuals, value_at_risk, '--contiguous=1' if contiguous else ''
+                )
+                with open("launch.sh", "w") as f:
+                    f.write(launch)
+                !sbatch launch.sh
+
+
